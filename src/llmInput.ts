@@ -1,10 +1,11 @@
 import type { IpadicFeatures, Tokenizer } from 'kuromoji';
 import type { Sentence, RubySegment } from './sentences';
+import { katakanaToHiragana, isKanaOnly, splitBySentenceEnd, JapaneseText, KanaString } from './kanaUtils';
+import { buildSegmentsFromTokens } from './kuromoji';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type KuromojiModule = any;
+export { buildTokenizer } from './kuromoji';
 
-const EXAMPLE_TEXTS = [
+export const EXAMPLE_TEXTS = [
   {
     label: '桃太郎',
     text: 'むかし、むかし、あるところにおじいさんとおばあさんがいました。おじいさんは山へ柴刈りに、おばあさんは川へ洗濯に行きました。おばあさんが川で洗濯をしていると、川上から大きな桃がどんぶらこどんぶらこと流れてきました。',
@@ -15,42 +16,14 @@ const EXAMPLE_TEXTS = [
   }
 ];
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type LM = any;
+type LM = typeof LanguageModel;
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function createSession(lm: LM, systemPrompt: string): Promise<any> {
+async function createSession(lm: LM, systemPrompt: string): Promise<LanguageModel> {
   return lm.create({
     initialPrompts: [{ role: 'system', content: systemPrompt }],
   });
 }
 
-// カタカナをひらがなに変換
-function katakanaToHiragana(str: string): string {
-  return str.replace(/[ァ-ン]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0x60));
-}
-
-// ひらがな・句読点・記号のみで構成されているか検証
-const KANA_ONLY = /^[ぁ-ん々ー、。「」『』・…！？\s]+$/;
-function isKanaOnly(str: string): boolean {
-  return KANA_ONLY.test(str);
-}
-
-// 句点・感嘆符・疑問符で機械的に段落分割するフォールバック
-function splitBySentenceEnd(text: string): string[] {
-  const result: string[] = [];
-  const re = /[^。！？]*[。！？]/g;
-  let m: RegExpExecArray | null;
-  let last = 0;
-  while ((m = re.exec(text)) !== null) {
-    result.push(m[0]);
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) result.push(text.slice(last));
-  return result.filter(s => s.length > 0);
-}
-
-// LLM出力の各セグメントを元テキストに照合し、ずれたセグメントだけ機械的に再分割して修復する
 function reconcileSegments(llmSegments: string[], originalText: string): string[] {
   const result: string[] = [];
   let pos = 0;
@@ -81,7 +54,6 @@ function reconcileSegments(llmSegments: string[], originalText: string): string[
   return result;
 }
 
-// ステップ1: LLMで意味段落に分割し、不一致部分を自動修復
 async function stepSplitParagraphs(lm: LM, text: string, onStatus?: (msg: string) => void): Promise<string[]> {
   const systemPrompt = `You are a Japanese text segmenter. Split the given Japanese text into meaningful paragraph-level chunks suitable for a typing game — each chunk should be one natural sentence or clause.
 
@@ -131,48 +103,6 @@ Output a JSON array of strings. Each string must be copied EXACTLY from the orig
   return splitBySentenceEnd(text);
 }
 
-// kuromoji tokenizeを使って段落からRubySegmentを生成する
-// readingが得られなかった漢字含みトークンはruby=textのままにしてLLM補完候補とする
-function buildSegmentsFromTokens(tokens: IpadicFeatures[], paragraph: string): RubySegment[] {
-  const segments: RubySegment[] = [];
-
-  let pos = 0;
-  for (const token of tokens) {
-    const sf = token.surface_form;
-    if (!paragraph.startsWith(sf, pos)) {
-      const idx = paragraph.indexOf(sf, pos);
-      if (idx > pos) {
-        const missed = paragraph.slice(pos, idx);
-        segments.push({ text: missed, ruby: missed });
-        pos = idx;
-      }
-    }
-
-    const reading = token.reading;
-    // readingがない・'*'・表層形そのまま（未知語）かつひらがな以外を含む場合はLLM補完候補
-    const noReading = !reading || reading === '*' || reading === sf;
-
-    if (noReading && !isKanaOnly(sf)) {
-      segments.push({ text: sf, ruby: sf });
-      console.log(`[kuromoji] no-reading: "${sf}" (word_type=${token.word_type}, reading=${reading})`);
-    } else {
-      const ruby = katakanaToHiragana(reading ?? sf);
-      segments.push({ text: sf, ruby });
-      console.log(`[kuromoji] "${sf}" → "${ruby}"`);
-    }
-
-    pos += sf.length;
-  }
-
-  if (pos < paragraph.length) {
-    const rest = paragraph.slice(pos);
-    segments.push({ text: rest, ruby: rest });
-  }
-
-  return segments;
-}
-
-// LLMでrubyがひらがなでないセグメントを補完する（kuromoji未知語 + 変換失敗分）
 async function fillMissingRubyWithLLM(lm: LM, segments: RubySegment[], paragraph: string): Promise<RubySegment[]> {
   const targets = segments
     .map((s, i) => ({ i, s }))
@@ -200,19 +130,17 @@ async function fillMissingRubyWithLLM(lm: LM, segments: RubySegment[], paragraph
   }
   session.destroy();
 
-  // LLM後もひらがなでないものが残った場合は警告だけしてテキストをrubyに使う
   const stillInvalid = result.filter(s => !isKanaOnly(s.ruby));
   if (stillInvalid.length > 0) {
     console.warn('[fillMissingRuby] still invalid after LLM:', stillInvalid.map(s => `"${s.text}"→"${s.ruby}"`));
-    return result.map(s => isKanaOnly(s.ruby) ? s : { text: s.text, ruby: s.text });
+    return result.map(s => isKanaOnly(s.ruby) ? s : { text: s.text, ruby: KanaString(s.text) });
   }
 
   return result;
 }
 
 async function processParagraph(tokenizer: Tokenizer<IpadicFeatures>, lm: LM | null, paragraph: string): Promise<Sentence> {
-  // 改行・全角スペース・制御文字を除去してからトークナイズ
-  paragraph = paragraph.replace(/[\r\n\t　 ]+/g, '');
+  paragraph = paragraph.replace(/[\r\n\t\u3000\xa0]+/g, '');
   console.log('[processParagraph] start:', paragraph);
 
   const tokens = tokenizer.tokenize(paragraph);
@@ -230,52 +158,22 @@ async function processParagraph(tokenizer: Tokenizer<IpadicFeatures>, lm: LM | n
     }
   }
 
-  const kana = finalSegments.map(s => s.ruby).join('');
+  const kana = KanaString(finalSegments.map(s => s.ruby).join(''));
   console.log('[processParagraph] kana:', kana);
-  return { text: paragraph, kana, segments: finalSegments };
+  return { text: JapaneseText(paragraph), kana, segments: finalSegments };
 }
 
-// kuromoji tokenizerをPromiseで初期化（browserified版を動的スクリプトロード）
-function buildTokenizer(): Promise<Tokenizer<IpadicFeatures>> {
-  return new Promise((resolve, reject) => {
-    if ((window as unknown as Record<string, KuromojiModule>).kuromoji) {
-      initTokenizer((window as unknown as Record<string, KuromojiModule>).kuromoji, resolve, reject);
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = '/kuromoji.js';
-    script.onload = () => {
-      const k = (window as unknown as Record<string, KuromojiModule>).kuromoji;
-      if (!k) { reject(new Error('kuromoji not found on window')); return; }
-      initTokenizer(k, resolve, reject);
-    };
-    script.onerror = () => reject(new Error('Failed to load kuromoji.js'));
-    document.head.appendChild(script);
-  });
-}
-
-function initTokenizer(
-  kuromoji: KuromojiModule,
-  resolve: (t: Tokenizer<IpadicFeatures>) => void,
-  reject: (e: Error) => void
-) {
-  kuromoji.builder({ dicPath: '/kuromoji-dict' }).build((err: Error | null, tokenizer: Tokenizer<IpadicFeatures>) => {
-    if (err) reject(err);
-    else resolve(tokenizer);
-  });
-}
-
-// テキストからSentence[]を生成するロジック（UIなし）
-// onProgress(done, total): 段落分割完了時はdone=0で呼ばれ、以降1段落完了ごとにdoneが増える
-// onStatus: 処理ステータスの文字列（段落分割フェーズのみ）
 export async function generateSentences(
   text: string,
   tokenizer: Tokenizer<IpadicFeatures>,
   onProgress?: (done: number, total: number) => void,
   onStatus?: (msg: string) => void,
 ): Promise<Sentence[]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const g = globalThis as any;
+  const g = globalThis as typeof globalThis & {
+    LanguageModel?: LM;
+    ai?: { languageModel?: LM };
+    window?: { ai?: { languageModel?: LM } };
+  };
   const lm = g.LanguageModel ?? g.ai?.languageModel ?? g.window?.ai?.languageModel;
 
   let lmAvailable: LM | null = null;
@@ -300,5 +198,3 @@ export async function generateSentences(
   }
   return results;
 }
-
-export { buildTokenizer, EXAMPLE_TEXTS };

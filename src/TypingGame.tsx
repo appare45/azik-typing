@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { InputMatcher, buildKanaUnits, KanaUnitIndex } from './azik';
+import { InputMatcher, KanaUnitIndex } from './azik';
+import { buildKanaUnits, KanaString } from './kanaUtils';
 import { SENTENCES } from './sentences';
 import type { RubySegment, Sentence } from './sentences';
-import { generateSentences, buildTokenizer, EXAMPLE_TEXTS } from './LLMInput';
+import { generateSentences, buildTokenizer, EXAMPLE_TEXTS } from './llmInput';
 import type { IpadicFeatures, Tokenizer } from 'kuromoji';
 
 type GameState = 'idle' | 'preparing' | 'playing' | 'finished';
@@ -145,7 +146,7 @@ export function TypingGame() {
   );
 
   const startGame = useCallback((sentences: Sentence[]) => {
-    const kana = sentences.map(s => s.kana).join('');
+    const kana = KanaString(sentences.map(s => s.kana).join(''));
     const m = new InputMatcher(kana);
     matcherRef.current = m;
     setMatcher(m);

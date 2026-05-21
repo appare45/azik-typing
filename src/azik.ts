@@ -2,6 +2,9 @@
 // https://github.com/azooKey/AzooKeyKanaKanjiConverter/blob/main/Sources/KanaKanjiConverterModule/InputManagement/InputTables/defaultAzik.swift
 // Copyright (c) 2023 Miwa / Ensan, MIT License (see LICENSES)
 
+export { buildKanaUnits } from './kanaUtils';
+import { buildKanaUnits, KanaString } from './kanaUtils';
+
 export type RomajiPattern = {
   romaji: string[];
   kana: string;
@@ -716,24 +719,6 @@ export function isComplete(input: string, patterns: string[]): boolean {
   return patterns.includes(input);
 }
 
-// かな文字列をkanaUnits単位に分解（拗音は2文字→1ユニット）
-export function buildKanaUnits(kanaStr: string): string[] {
-  const result: string[] = [];
-  let i = 0;
-  const chars = [...kanaStr];
-  const small = 'ぁぃぅぇぉゃゅょ';
-  while (i < chars.length) {
-    if (i + 1 < chars.length && small.includes(chars[i + 1])) {
-      result.push(chars[i] + chars[i + 1]);
-      i += 2;
-    } else {
-      result.push(chars[i]);
-      i++;
-    }
-  }
-  return result;
-}
-
 // -----------------------------------------------------------------------
 // NFA方式のリアルタイム入力マッチャー
 // かな列全体に対して、任意のローマ字入力経路を並列追跡する
@@ -761,15 +746,11 @@ export class InputMatcher {
   private states: NFAState[];
   private recentRomaji: string = '';
 
-  constructor(kanaStr: string) {
+  constructor(kanaStr: KanaString) {
     // かな文字列をUnicode文字単位に分解（拗音は1文字扱い）
     // ただし複合かな単位（例: きょ）はそのまま2文字として扱う
-    this.kana = this.buildKanaUnits(kanaStr);
+    this.kana = buildKanaUnits(kanaStr);
     this.states = [{ kanaPos: KanaUnitIndex(0), buf: '' }];
-  }
-
-  private buildKanaUnits(kanaStr: string): string[] {
-    return buildKanaUnits(kanaStr);
   }
 
   get kanaUnits(): string[] { return this.kana; }
@@ -846,7 +827,7 @@ export class InputMatcher {
     // ROMAJI_TO_KANA経由のマッチ（通常ルート）
     const mapped = ROMAJI_TO_KANA[buf];
     if (mapped) {
-      const mappedUnits = this.buildKanaUnits(mapped);
+      const mappedUnits = buildKanaUnits(KanaString(mapped));
       let pos = kanaPos;
       let ok = true;
       for (const unit of mappedUnits) {
@@ -871,7 +852,7 @@ export class InputMatcher {
   private canExtend(buf: string, kanaPos: KanaUnitIndex): boolean {
     for (const [romaji, mapped] of Object.entries(ROMAJI_TO_KANA)) {
       if (!romaji.startsWith(buf)) continue;
-      const mappedUnits = this.buildKanaUnits(mapped);
+      const mappedUnits = buildKanaUnits(KanaString(mapped));
       let pos = kanaPos;
       let ok = true;
       for (const unit of mappedUnits) {
