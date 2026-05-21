@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { InputMatcher, KanaUnitIndex } from './azik';
+import { InputMatcher, KanaUnitIndex } from './azikEngine';
 import { buildKanaUnits, KanaString } from './kanaUtils';
 import { SENTENCES } from './sentences';
 import type { RubySegment, Sentence } from './sentences';
@@ -104,8 +104,250 @@ function RubyText({
   );
 }
 
-// 日本国憲法前文を1つのSentenceとして扱う（segments=全段落のflatMap）
 const PRESET_SENTENCES = SENTENCES;
+
+function IdleView({
+  inputText,
+  onChangeText,
+  onStart,
+  tokenizerReady,
+  prepareError,
+}: {
+  inputText: string;
+  onChangeText: (text: string) => void;
+  onStart: () => void;
+  tokenizerReady: boolean;
+  prepareError: string;
+}) {
+  return (
+    <div style={{ marginBottom: '1.5rem' }}>
+      <div style={{ marginBottom: '0.5rem', display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+        <span style={{ fontSize: '0.82rem', color: '#888' }}>例文:</span>
+        {EXAMPLE_TEXTS.map((ex) => (
+          <button
+            key={ex.label}
+            onClick={() => onChangeText(ex.text)}
+            style={{ fontSize: '0.8rem', padding: '0.2rem 0.7rem', cursor: 'pointer' }}
+          >
+            {ex.label}
+          </button>
+        ))}
+        {inputText && (
+          <button
+            onClick={() => onChangeText('')}
+            style={{ fontSize: '0.8rem', padding: '0.2rem 0.5rem', cursor: 'pointer', color: '#999' }}
+          >
+            ✕ クリア
+          </button>
+        )}
+      </div>
+
+      <textarea
+        value={inputText}
+        onChange={e => onChangeText(e.target.value)}
+        placeholder={`テキストを入力（空欄のままスタートすると日本国憲法前文）`}
+        rows={4}
+        style={{
+          width: '100%',
+          boxSizing: 'border-box',
+          fontFamily: 'inherit',
+          fontSize: '0.95rem',
+          padding: '0.6rem',
+          border: '1px solid #ccc',
+          resize: 'vertical',
+          color: '#333',
+        }}
+      />
+
+      <div style={{ marginTop: '0.6rem', display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
+        <button
+          onClick={onStart}
+          disabled={!tokenizerReady}
+          style={{
+            padding: '0.4rem 1.4rem',
+            fontSize: '1rem',
+            cursor: tokenizerReady ? 'pointer' : 'default',
+          }}
+        >
+          スタート
+        </button>
+        {!tokenizerReady && (
+          <span style={{ fontSize: '0.8rem', color: '#999' }}>辞書を読み込んでいます...</span>
+        )}
+        {prepareError && (
+          <span style={{ fontSize: '0.85rem', color: 'red' }}>{prepareError}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PreparingView({ progress, total, status }: { progress: number; total: number; status: string }) {
+  return (
+    <div style={{ padding: '2rem 0', color: '#666' }}>
+      <div style={{ marginBottom: '0.5rem', fontSize: '0.95rem' }}>
+        {total === 0
+          ? (status || '処理中...')
+          : `ルビを生成中... ${progress} / ${total} 段落`}
+      </div>
+      {total === 0 && status && (
+        <div style={{ fontSize: '0.8rem', color: '#aaa' }}>
+          しばらくお待ちください
+        </div>
+      )}
+      {total > 0 && (
+        <div style={{ width: '100%', maxWidth: '320px', height: '6px', background: '#eee', borderRadius: '3px' }}>
+          <div style={{
+            height: '100%',
+            borderRadius: '3px',
+            background: '#4a9',
+            width: `${Math.round((progress / total) * 100)}%`,
+            transition: 'width 0.2s ease',
+          }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SentenceView({
+  sentences,
+  paraKanaOffsets,
+  kanaUnitsLength,
+  isPlaying,
+  kanaPos,
+  wrongKey,
+  recentRomaji,
+  buf,
+  paraRefs,
+}: {
+  sentences: Sentence[];
+  paraKanaOffsets: KanaUnitIndex[];
+  kanaUnitsLength: number;
+  isPlaying: boolean;
+  kanaPos: KanaUnitIndex;
+  wrongKey: boolean;
+  recentRomaji: string;
+  buf: string;
+  paraRefs: React.RefObject<(HTMLDivElement | null)[]>;
+}) {
+  return (
+    <div style={{
+      marginBottom: '4rem',
+      padding: '1.2rem 1.5rem',
+      border: '1px solid #ddd',
+      fontSize: '1.4rem',
+    }}>
+      {sentences.map((s, pi) => {
+        const offset = paraKanaOffsets[pi];
+        const nextOffset = pi + 1 < sentences.length ? paraKanaOffsets[pi + 1] : kanaUnitsLength;
+        const paraLen = nextOffset - offset;
+        const isActive = isPlaying && kanaPos >= offset && kanaPos < offset + paraLen;
+        const relKanaPos: KanaUnitIndex = isPlaying ? KanaUnitIndex(kanaPos - offset) : KanaUnitIndex(-1);
+        return (
+          <div key={pi} ref={el => { paraRefs.current[pi] = el; }} style={{
+            lineHeight: 3.2,
+            paddingBottom: isPlaying ? '2rem' : '1.5rem',
+            borderBottom: pi < sentences.length - 1 ? '1px solid #eee' : 'none',
+            marginBottom: pi < sentences.length - 1 ? '2rem' : 0,
+          }}>
+            <RubyText
+              segments={s.segments}
+              kanaPos={relKanaPos}
+              wrongKey={isActive ? wrongKey : false}
+              recentRomaji={isActive ? recentRomaji : ''}
+              buf={isActive ? buf : ''}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function StatusBar({
+  elapsedTime,
+  keystrokes,
+  missCount,
+  kps,
+  accuracy,
+  kanaPos,
+  totalKana,
+}: {
+  elapsedTime: number;
+  keystrokes: number;
+  missCount: number;
+  kps: string;
+  accuracy: number;
+  kanaPos: KanaUnitIndex;
+  totalKana: number;
+}) {
+  return (
+    <div style={{
+      position: 'fixed',
+      bottom: 0, left: 0, right: 0,
+      background: '#fff',
+      borderTop: '1px solid #ddd',
+      padding: '0.6rem 2rem',
+      display: 'flex',
+      gap: '2rem',
+      fontSize: '0.9rem',
+      zIndex: 100,
+    }}>
+      <span>時間: {elapsedTime.toFixed(1)}s</span>
+      <span>打鍵: {keystrokes}</span>
+      <span>ミス: {missCount}</span>
+      <span>KPS: {kps}</span>
+      <span>正確率: {accuracy}%</span>
+      <span>{kanaPos} / {totalKana} 文字</span>
+    </div>
+  );
+}
+
+function ResultView({
+  elapsedTime,
+  kps,
+  accuracy,
+  missCount,
+  onRestart,
+}: {
+  elapsedTime: number;
+  kps: string;
+  accuracy: number;
+  missCount: number;
+  onRestart: () => void;
+}) {
+  return (
+    <div style={{ textAlign: 'center', padding: '2rem' }}>
+      <h2>完了!</h2>
+      <div style={{ display: 'flex', gap: '2rem', justifyContent: 'center', margin: '1rem 0' }}>
+        <div>
+          <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{elapsedTime.toFixed(1)}s</div>
+          <div style={{ fontSize: '0.8rem', color: '#666' }}>時間</div>
+        </div>
+        <div>
+          <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{kps}</div>
+          <div style={{ fontSize: '0.8rem', color: '#666' }}>KPS</div>
+        </div>
+        <div>
+          <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{accuracy}%</div>
+          <div style={{ fontSize: '0.8rem', color: '#666' }}>正確率</div>
+        </div>
+        <div>
+          <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{missCount}</div>
+          <div style={{ fontSize: '0.8rem', color: '#666' }}>ミス</div>
+        </div>
+      </div>
+      <p style={{ color: '#666', fontSize: '0.9rem' }}>Enter キーでもう一度</p>
+      <button
+        onClick={onRestart}
+        style={{ marginTop: '0.4rem', fontSize: '0.85rem', padding: '0.3rem 1rem', cursor: 'pointer' }}
+      >
+        別のテキストを選ぶ
+      </button>
+    </div>
+  );
+}
 
 export function TypingGame() {
   const [gameState, setGameState] = useState<GameState>('idle');
@@ -295,182 +537,54 @@ export function TypingGame() {
           : 'AZIKタイピング'}
       </h1>
 
-      {/* idle: テキスト選択・入力フォーム */}
       {gameState === 'idle' && (
-        <div style={{ marginBottom: '1.5rem' }}>
-          <div style={{ marginBottom: '0.5rem', display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
-            <span style={{ fontSize: '0.82rem', color: '#888' }}>例文:</span>
-            {EXAMPLE_TEXTS.map((ex) => (
-              <button
-                key={ex.label}
-                onClick={() => setInputText(ex.text)}
-                style={{ fontSize: '0.8rem', padding: '0.2rem 0.7rem', cursor: 'pointer' }}
-              >
-                {ex.label}
-              </button>
-            ))}
-            {inputText && (
-              <button
-                onClick={() => setInputText('')}
-                style={{ fontSize: '0.8rem', padding: '0.2rem 0.5rem', cursor: 'pointer', color: '#999' }}
-              >
-                ✕ クリア
-              </button>
-            )}
-          </div>
-
-          <textarea
-            value={inputText}
-            onChange={e => setInputText(e.target.value)}
-            placeholder={`テキストを入力（空欄のままスタートすると日本国憲法前文）`}
-            rows={4}
-            style={{
-              width: '100%',
-              boxSizing: 'border-box',
-              fontFamily: 'inherit',
-              fontSize: '0.95rem',
-              padding: '0.6rem',
-              border: '1px solid #ccc',
-              resize: 'vertical',
-              color: '#333',
-            }}
-          />
-
-          <div style={{ marginTop: '0.6rem', display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
-            <button
-              onClick={handleStart}
-              disabled={!tokenizerReady}
-              style={{
-                padding: '0.4rem 1.4rem',
-                fontSize: '1rem',
-                cursor: tokenizerReady ? 'pointer' : 'default',
-              }}
-            >
-              スタート
-            </button>
-            {!tokenizerReady && (
-              <span style={{ fontSize: '0.8rem', color: '#999' }}>辞書を読み込んでいます...</span>
-            )}
-            {prepareError && (
-              <span style={{ fontSize: '0.85rem', color: 'red' }}>{prepareError}</span>
-            )}
-          </div>
-        </div>
+        <IdleView
+          inputText={inputText}
+          onChangeText={setInputText}
+          onStart={handleStart}
+          tokenizerReady={tokenizerReady}
+          prepareError={prepareError}
+        />
       )}
 
-      {/* preparing: ルビ生成中 */}
       {gameState === 'preparing' && (
-        <div style={{ padding: '2rem 0', color: '#666' }}>
-          <div style={{ marginBottom: '0.5rem', fontSize: '0.95rem' }}>
-            {prepareTotal === 0
-              ? (prepareStatus || '処理中...')
-              : `ルビを生成中... ${prepareProgress} / ${prepareTotal} 段落`}
-          </div>
-          {prepareTotal === 0 && prepareStatus && (
-            <div style={{ fontSize: '0.8rem', color: '#aaa' }}>
-              しばらくお待ちください
-            </div>
-          )}
-          {prepareTotal > 0 && (
-            <div style={{ width: '100%', maxWidth: '320px', height: '6px', background: '#eee', borderRadius: '3px' }}>
-              <div style={{
-                height: '100%',
-                borderRadius: '3px',
-                background: '#4a9',
-                width: `${Math.round((prepareProgress / prepareTotal) * 100)}%`,
-                transition: 'width 0.2s ease',
-              }} />
-            </div>
-          )}
-        </div>
+        <PreparingView progress={prepareProgress} total={prepareTotal} status={prepareStatus} />
       )}
 
-      {/* テキスト表示（playing / finished） */}
       {(gameState === 'playing' || gameState === 'finished') && (
-        <div style={{
-          marginBottom: '4rem',
-          padding: '1.2rem 1.5rem',
-          border: '1px solid #ddd',
-          fontSize: '1.4rem',
-        }}>
-          {activeSentences.map((s, pi) => {
-            const offset = paraKanaOffsets[pi];
-            const nextOffset = pi + 1 < activeSentences.length ? paraKanaOffsets[pi + 1] : kanaUnits.length;
-            const paraLen = nextOffset - offset;
-            const isActive = gameState === 'playing' && kanaPos >= offset && kanaPos < offset + paraLen;
-            const relKanaPos: KanaUnitIndex = gameState === 'playing' ? KanaUnitIndex(kanaPos - offset) : KanaUnitIndex(-1);
-            return (
-              <div key={pi} ref={el => { paraRefs.current[pi] = el; }} style={{
-                lineHeight: 3.2,
-                paddingBottom: gameState === 'playing' ? '2rem' : '1.5rem',
-                borderBottom: pi < activeSentences.length - 1 ? '1px solid #eee' : 'none',
-                marginBottom: pi < activeSentences.length - 1 ? '2rem' : 0,
-              }}>
-                <RubyText
-                  segments={s.segments}
-                  kanaPos={relKanaPos}
-                  wrongKey={isActive ? wrongKey : false}
-                  recentRomaji={isActive ? recentRomaji : ''}
-                  buf={isActive ? buf : ''}
-                />
-              </div>
-            );
-          })}
-        </div>
+        <SentenceView
+          sentences={activeSentences}
+          paraKanaOffsets={paraKanaOffsets}
+          kanaUnitsLength={kanaUnits.length}
+          isPlaying={gameState === 'playing'}
+          kanaPos={kanaPos}
+          wrongKey={wrongKey}
+          recentRomaji={recentRomaji}
+          buf={buf}
+          paraRefs={paraRefs}
+        />
       )}
 
-      {/* playing: ステータスバー */}
       {gameState === 'playing' && (
-        <div style={{
-          position: 'fixed',
-          bottom: 0, left: 0, right: 0,
-          background: '#fff',
-          borderTop: '1px solid #ddd',
-          padding: '0.6rem 2rem',
-          display: 'flex',
-          gap: '2rem',
-          fontSize: '0.9rem',
-          zIndex: 100,
-        }}>
-          <span>時間: {elapsedTime.toFixed(1)}s</span>
-          <span>打鍵: {keystrokes}</span>
-          <span>ミス: {missCount}</span>
-          <span>KPS: {kps}</span>
-          <span>正確率: {accuracy}%</span>
-          <span>{kanaPos} / {fullKana.length} 文字</span>
-        </div>
+        <StatusBar
+          elapsedTime={elapsedTime}
+          keystrokes={keystrokes}
+          missCount={missCount}
+          kps={kps}
+          accuracy={accuracy}
+          kanaPos={kanaPos}
+          totalKana={fullKana.length}
+        />
       )}
 
-      {/* finished: 結果 */}
       {gameState === 'finished' && (
-        <div style={{ textAlign: 'center', padding: '2rem' }}>
-          <h2>完了!</h2>
-          <div style={{ display: 'flex', gap: '2rem', justifyContent: 'center', margin: '1rem 0' }}>
-            <div>
-              <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{elapsedTime.toFixed(1)}s</div>
-              <div style={{ fontSize: '0.8rem', color: '#666' }}>時間</div>
-            </div>
-            <div>
-              <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{kps}</div>
-              <div style={{ fontSize: '0.8rem', color: '#666' }}>KPS</div>
-            </div>
-            <div>
-              <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{accuracy}%</div>
-              <div style={{ fontSize: '0.8rem', color: '#666' }}>正確率</div>
-            </div>
-            <div>
-              <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{missCount}</div>
-              <div style={{ fontSize: '0.8rem', color: '#666' }}>ミス</div>
-            </div>
-          </div>
-          <p style={{ color: '#666', fontSize: '0.9rem' }}>Enter キーでもう一度</p>
-          <button
-            onClick={() => setGameState('idle')}
-            style={{ marginTop: '0.4rem', fontSize: '0.85rem', padding: '0.3rem 1rem', cursor: 'pointer' }}
-          >
-            別のテキストを選ぶ
-          </button>
-        </div>
+        <ResultView
+          elapsedTime={elapsedTime}
+          kps={kps}
+          accuracy={accuracy}
+          missCount={missCount}
+          onRestart={() => setGameState('idle')}
+        />
       )}
     </div>
   );
