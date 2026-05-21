@@ -4,16 +4,26 @@ import { katakanaToHiragana, isKanaOnly, JapaneseText, KanaString } from './kana
 
 type KuromojiModule = typeof import('kuromoji');
 
+function isKuromojiModule(v: unknown): v is KuromojiModule {
+  return typeof v === 'object' && v !== null && 'builder' in v && typeof (v as Record<string, unknown>).builder === 'function';
+}
+
+function getWindowKuromoji(): KuromojiModule | undefined {
+  const v = (window as unknown as Record<string, unknown>).kuromoji;
+  return isKuromojiModule(v) ? v : undefined;
+}
+
 export function buildTokenizer(): Promise<Tokenizer<IpadicFeatures>> {
   return new Promise((resolve, reject) => {
-    if ((window as unknown as Record<string, KuromojiModule>).kuromoji) {
-      initTokenizer((window as unknown as Record<string, KuromojiModule>).kuromoji, resolve, reject);
+    const existing = getWindowKuromoji();
+    if (existing) {
+      initTokenizer(existing, resolve, reject);
       return;
     }
     const script = document.createElement('script');
     script.src = '/kuromoji.js';
     script.onload = () => {
-      const k = (window as unknown as Record<string, KuromojiModule>).kuromoji;
+      const k = getWindowKuromoji();
       if (!k) { reject(new Error('kuromoji not found on window')); return; }
       initTokenizer(k, resolve, reject);
     };
@@ -53,11 +63,9 @@ export function buildSegmentsFromTokens(tokens: IpadicFeatures[], paragraph: str
 
     if (noReading && !isKanaOnly(sf)) {
       segments.push({ text: JapaneseText(sf), ruby: KanaString(sf) });
-      console.log(`[kuromoji] no-reading: "${sf}" (word_type=${token.word_type}, reading=${reading})`);
     } else {
       const ruby = katakanaToHiragana(reading ?? sf);
       segments.push({ text: JapaneseText(sf), ruby });
-      console.log(`[kuromoji] "${sf}" → "${ruby}"`);
     }
 
     pos += sf.length;

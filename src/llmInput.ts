@@ -60,7 +60,6 @@ async function stepSplitParagraphs(lm: LM, text: string, onStatus?: (msg: string
 Output a JSON array of strings. Each string must be copied EXACTLY from the original text. No markdown, no explanation.`;
   const schema = { type: 'array', items: { type: 'string' } };
 
-  console.log('[stepSplitParagraphs] input:', text);
   onStatus?.('AIで段落を分割中...');
   const session = await createSession(lm, systemPrompt);
   let raw: string;
@@ -71,95 +70,79 @@ Output a JSON array of strings. Each string must be copied EXACTLY from the orig
   }
   session.destroy();
 
-  console.log('[stepSplitParagraphs] LLM raw output:', raw);
-
-  let llmResult: unknown;
+  let parsed: unknown;
   try {
-    llmResult = JSON.parse(raw.trim());
+    parsed = JSON.parse(raw.trim());
   } catch {
-    console.warn('[stepSplitParagraphs] JSON parse failed, fallback to splitBySentenceEnd');
     onStatus?.('分割結果を解析できなかったため、句点で分割します');
     return splitBySentenceEnd(text);
   }
-  if (!Array.isArray(llmResult) || llmResult.some(s => typeof s !== 'string')) {
-    console.warn('[stepSplitParagraphs] result is not string[], fallback');
+  if (!Array.isArray(parsed) || parsed.some(s => typeof s !== 'string')) {
     onStatus?.('分割結果が不正なため、句点で分割します');
     return splitBySentenceEnd(text);
   }
+  const llmResult: string[] = parsed;
 
-  const joined = (llmResult as string[]).join('');
-  if (joined === text) {
-    console.log('[stepSplitParagraphs] exact match OK');
-    return llmResult as string[];
-  }
+  const joined = llmResult.join('');
+  if (joined === text) return llmResult;
 
-  console.warn('[stepSplitParagraphs] mismatch, trying reconcile. joined:', joined);
   onStatus?.('分割結果を照合・修復中...');
-  const reconciled = reconcileSegments(llmResult as string[], text);
+  const reconciled = reconcileSegments(llmResult, text);
   if (reconciled.join('') === text) return reconciled;
 
-  console.warn('[stepSplitParagraphs] reconcile failed, fallback to splitBySentenceEnd');
   onStatus?.('修復できなかったため、句点で分割します');
   return splitBySentenceEnd(text);
 }
 
-async function fillMissingRubyWithLLM(lm: LM, segments: RubySegment[], paragraph: string): Promise<RubySegment[]> {
+async function fillMissingRubyWithLLM(lm: LM, segments: RubySegment[], paragraph: string, onStatus?: (msg: string) => void): Promise<RubySegment[]> {
   const targets = segments
     .map((s, i) => ({ i, s }))
     .filter(({ s }) => !isKanaOnly(s.ruby));
 
   if (targets.length === 0) return segments;
 
-  console.log('[fillMissingRuby] targets:', targets.map(({ s }) => `"${s.text}"(ruby="${s.ruby}")`));
+  onStatus?.(`ルビ補完: ${targets.map(({ s }) => s.text).join(' ')} ...`);
 
-  const session = await createSession(lm, `You are a Japanese furigana expert. You will be given a sentence and one word from it. Output only the correct hiragana reading of that word as it is used in the sentence. Output only hiragana, nothing else.`);
+  const systemPrompt = `You are a Japanese furigana expert. You will be given a sentence and one word from it. Output only the correct hiragana reading of that word as it is used in the sentence. Output only hiragana, nothing else.`;
 
   const result = [...segments];
-  for (const { i, s } of targets) {
+  await Promise.all(targets.map(async ({ i, s }) => {
+    const session = await createSession(lm, systemPrompt);
     const prompt = `Sentence: ${paragraph}\nWord: ${s.text}\nHiragana reading:`;
-    let reading: string;
     try {
-      reading = (await session.prompt(prompt)).trim();
+      const reading = (await session.prompt(prompt)).trim();
+      const converted = katakanaToHiragana(reading);
+      result[i] = { text: s.text, ruby: converted };
+      onStatus?.(`  ${s.text} → ${converted}`);
     } catch {
-      console.warn(`[fillMissingRuby] failed for "${s.text}", keeping as-is`);
-      continue;
+      onStatus?.(`  ${s.text} → (失敗)`);
+    } finally {
+      session.destroy();
     }
-    const converted = katakanaToHiragana(reading);
-    console.log(`[fillMissingRuby] "${s.text}" → "${converted}"`);
-    result[i] = { text: s.text, ruby: converted };
-  }
-  session.destroy();
+  }));
 
   const stillInvalid = result.filter(s => !isKanaOnly(s.ruby));
   if (stillInvalid.length > 0) {
-    console.warn('[fillMissingRuby] still invalid after LLM:', stillInvalid.map(s => `"${s.text}"→"${s.ruby}"`));
     return result.map(s => isKanaOnly(s.ruby) ? s : { text: s.text, ruby: KanaString(s.text) });
   }
 
   return result;
 }
 
-async function processParagraph(tokenizer: Tokenizer<IpadicFeatures>, lm: LM | null, paragraph: string): Promise<Sentence> {
+async function processParagraph(tokenizer: Tokenizer<IpadicFeatures>, lm: LM | null, paragraph: string, onStatus?: (msg: string) => void): Promise<Sentence> {
   paragraph = paragraph.replace(/[\r\n\t\u3000\xa0]+/g, '');
-  console.log('[processParagraph] start:', paragraph);
-
+  onStatus?.(`\u89e3\u6790: ${paragraph.slice(0, 20)}${paragraph.length > 20 ? '\u2026' : ''}`);
   const tokens = tokenizer.tokenize(paragraph);
-  console.log('[processParagraph] tokens:', tokens.map(t => `${t.surface_form}(${t.reading ?? '?'})`).join(' '));
-
+  onStatus?.(`  \u30c8\u30fc\u30af\u30f3: ${tokens.map(t => t.surface_form).join(' / ')}`);
   const segments = buildSegmentsFromTokens(tokens, paragraph);
 
   let finalSegments = segments;
   if (lm !== null) {
-    finalSegments = await fillMissingRubyWithLLM(lm, segments, paragraph);
-  } else {
-    const missing = segments.filter(s => !isKanaOnly(s.ruby));
-    if (missing.length > 0) {
-      console.warn('[processParagraph] LLM unavailable, leaving unread:', missing.map(s => s.text));
-    }
+    finalSegments = await fillMissingRubyWithLLM(lm, segments, paragraph, onStatus);
   }
 
   const kana = KanaString(finalSegments.map(s => s.ruby).join(''));
-  console.log('[processParagraph] kana:', kana);
+  onStatus?.(`  \u304b\u306a: ${kana}`);
   return { text: JapaneseText(paragraph), kana, segments: finalSegments };
 }
 
@@ -190,11 +173,11 @@ export async function generateSentences(
 
   onProgress?.(0, paras.length);
 
-  const results: Sentence[] = [];
-  for (const para of paras) {
-    const sentence = await processParagraph(tokenizer, lmAvailable, para);
-    results.push(sentence);
-    onProgress?.(results.length, paras.length);
-  }
+  let done = 0;
+  const results = await Promise.all(paras.map(async para => {
+    const sentence = await processParagraph(tokenizer, lmAvailable, para, onStatus);
+    onProgress?.(++done, paras.length);
+    return sentence;
+  }));
   return results;
 }
