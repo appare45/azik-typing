@@ -1,73 +1,61 @@
-# React + TypeScript + Vite
+# azik-typing
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+AZIK入力方式のタイピング練習ゲームです。日本国憲法前文をプリセットとして収録しており、任意の日本語テキストを入力して練習することもできます。
 
-Currently, two official plugins are available:
+## 特徴
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **AZIK入力対応** — 標準ローマ字に加え、`sz`→「さん」、`kz`→「かん」のような子音+拡張キーによる高速入力に対応
+- **任意テキスト対応** — 好きな日本語テキストを貼り付けると、kuromoji.js で形態素解析してルビを自動生成
+- **LLM補完** — Chrome の Prompt API（Gemini Nano）が利用可能な環境では、kuromoji が読めない語をAIで補完し、意味のある段落単位に分割
+- **リアルタイムフィードバック** — 入力バッファ・直前のローマ字・KPS・正確率をリアルタイム表示
 
-## React Compiler
+## 動作環境
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Node.js 18以上、モダンブラウザ（Chrome推奨）。
 
-## Expanding the ESLint configuration
+LLM補完機能は [Chrome Prompt API](https://developer.chrome.com/docs/ai/built-in) が有効な Chrome でのみ動作します。Gemini Nano が利用できない環境でも kuromoji.js によるルビ生成は動作します。
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## セットアップ
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## コマンド
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run dev      # 開発サーバー起動
+npm run build    # ビルド
+npm run lint     # ESLint
+npm run preview  # ビルド成果物のプレビュー
 ```
+
+## AZIK入力方式について
+
+[AzooKey](https://github.com/azooKey/AzooKeyKanaKanjiConverter) の defaultAzik.swift に基づく実装です。標準ローマ字入力に以下の拡張を追加しています。
+
+| 入力例 | 出力 |
+|--------|------|
+| `sz` | さん |
+| `kz` | かん |
+| `tz` | たん |
+| `sq` | さい |
+| `sh` | さう（長音） |
+| `ms` | ます |
+| `ds` | です |
+
+その他の対応表は `src/azik.ts` の `ROMAJI_TO_KANA` を参照してください。
+
+## テキスト入力機能
+
+idle画面のテキストエリアに日本語を貼り付けて「スタート」を押すと：
+
+1. LLMが利用可能な場合 → AIが意味段落に分割
+2. LLMが利用できない場合 → 句点・感嘆符・疑問符で分割
+3. kuromoji.js で形態素解析してルビを付与
+4. kuromoji が読めなかった語はLLMで補完
+
+## ライセンス
+
+MIT
