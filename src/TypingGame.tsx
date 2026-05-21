@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { InputMatcher, buildKanaUnits, KanaUnitIndex } from './azik';
-import { ALL_SENTENCE, SENTENCES } from './sentences';
-import type { RubySegment } from './sentences';
+import { SENTENCES } from './sentences';
+import type { RubySegment, Sentence } from './sentences';
+import { generateSentences, buildTokenizer, EXAMPLE_TEXTS } from './LLMInput';
+import type { IpadicFeatures, Tokenizer } from 'kuromoji';
 
-type GameState = 'idle' | 'playing' | 'finished';
+type GameState = 'idle' | 'preparing' | 'playing' | 'finished';
 
-// セグメントごとのkanaUnits数（InputMatcherと同じ単位）を事前計算（累積）
 function buildSegmentKanaOffsets(segments: RubySegment[]): KanaUnitIndex[] {
   const offsets: KanaUnitIndex[] = [];
   let pos = 0;
@@ -16,7 +17,6 @@ function buildSegmentKanaOffsets(segments: RubySegment[]): KanaUnitIndex[] {
   return offsets;
 }
 
-// ルビの各文字をどの色で表示するか（ひらがなの表示単位はkanaUnitsと合わせたい）
 type SegmentState = 'done' | 'active' | 'pending';
 
 function getSegmentState(
@@ -103,8 +103,12 @@ function RubyText({
   );
 }
 
+// 日本国憲法前文を1つのSentenceとして扱う（segments=全段落のflatMap）
+const PRESET_SENTENCES = SENTENCES;
+
 export function TypingGame() {
   const [gameState, setGameState] = useState<GameState>('idle');
+  const [activeSentences, setActiveSentences] = useState<Sentence[]>(PRESET_SENTENCES);
   const [matcher, setMatcher] = useState<InputMatcher | null>(null);
   const [kanaPos, setKanaPos] = useState<KanaUnitIndex>(KanaUnitIndex(0));
   const [buf, setBuf] = useState('');
@@ -114,17 +118,38 @@ export function TypingGame() {
   const [keystrokes, setKeystrokes] = useState(0);
   const [missCount, setMissCount] = useState(0);
   const [wrongKey, setWrongKey] = useState(false);
+
+  // テキスト入力UI
+  const [inputText, setInputText] = useState('');
+  const [prepareProgress, setPrepareProgress] = useState(0);
+  const [prepareTotal, setPrepareTotal] = useState(0);
+  const [prepareStatus, setPrepareStatus] = useState('');
+  const [prepareError, setPrepareError] = useState('');
+
   const containerRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const matcherRef = useRef<InputMatcher | null>(null);
   const paraRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const tokenizerRef = useRef<Tokenizer<IpadicFeatures> | null>(null);
+  const [tokenizerReady, setTokenizerReady] = useState(false);
 
-  const sentence = ALL_SENTENCE;
+  useEffect(() => {
+    buildTokenizer()
+      .then(t => { tokenizerRef.current = t; setTokenizerReady(true); })
+      .catch(err => console.error('[kuromoji] failed to load:', err));
+  }, []);
 
-  const startGame = useCallback(() => {
-    const m = new InputMatcher(sentence.kana);
+  const fullKana = useMemo(
+    () => activeSentences.map(s => s.kana).join(''),
+    [activeSentences]
+  );
+
+  const startGame = useCallback((sentences: Sentence[]) => {
+    const kana = sentences.map(s => s.kana).join('');
+    const m = new InputMatcher(kana);
     matcherRef.current = m;
     setMatcher(m);
+    setActiveSentences(sentences);
     setKanaPos(KanaUnitIndex(0));
     setBuf('');
     setRecentRomaji('');
@@ -134,7 +159,40 @@ export function TypingGame() {
     setWrongKey(false);
     setGameState('playing');
     setStartTime(Date.now());
-  }, [sentence]);
+  }, []);
+
+  const handleStart = useCallback(async () => {
+    if (!tokenizerRef.current) return;
+    const text = inputText.trim();
+
+    if (!text) {
+      // テキスト未入力ならプリセット
+      startGame(PRESET_SENTENCES);
+      return;
+    }
+
+    setGameState('preparing');
+    setPrepareProgress(0);
+    setPrepareTotal(0);
+    setPrepareStatus('');
+    setPrepareError('');
+
+    try {
+      const sentences = await generateSentences(
+        text,
+        tokenizerRef.current,
+        (done, total) => {
+          setPrepareProgress(done);
+          setPrepareTotal(total);
+        },
+        (msg) => setPrepareStatus(msg),
+      );
+      startGame(sentences);
+    } catch (err) {
+      setPrepareError(err instanceof Error ? err.message : String(err));
+      setGameState('idle');
+    }
+  }, [inputText, startGame]);
 
   useEffect(() => {
     if (gameState === 'playing') {
@@ -147,14 +205,16 @@ export function TypingGame() {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [gameState, startTime]);
 
-
   useEffect(() => {
-    containerRef.current?.focus();
+    if (gameState === 'idle' || gameState === 'finished') {
+      containerRef.current?.focus();
+    }
   }, [gameState]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (gameState === 'idle' || gameState === 'finished') {
-      if (e.key === 'Enter') startGame();
+    if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
+    if (gameState === 'finished') {
+      if (e.key === 'Enter') startGame(activeSentences);
       return;
     }
     if (gameState !== 'playing') return;
@@ -191,22 +251,20 @@ export function TypingGame() {
       setWrongKey(true);
       setTimeout(() => setWrongKey(false), 150);
     }
-  }, [gameState, startTime, startGame]);
+  }, [gameState, startTime, startGame, activeSentences]);
 
-  // 各段落の先頭かなユニット絶対位置（InputMatcherのkanaUnits単位、定数）
   const paraKanaOffsets = useMemo(() => {
     const offsets: KanaUnitIndex[] = [];
     let acc = 0;
-    for (const s of SENTENCES) {
+    for (const s of activeSentences) {
       offsets.push(KanaUnitIndex(acc));
       acc += buildKanaUnits(s.kana).length;
     }
     return offsets;
-  }, []);
+  }, [activeSentences]);
 
   const kanaUnits = matcher?.kanaUnits ?? [];
 
-  // 入力のたびにアクティブ段落を中央にスクロール
   const activePara = gameState === 'playing'
     ? paraKanaOffsets.findLastIndex(offset => kanaPos >= offset)
     : -1;
@@ -214,12 +272,14 @@ export function TypingGame() {
     if (activePara >= 0) {
       paraRefs.current[activePara]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [kanaPos]);
+  }, [activePara]);
 
   const kps = elapsedTime > 0 ? (keystrokes / elapsedTime).toFixed(1) : '0.0';
   const accuracy = keystrokes > 0
     ? Math.round(((keystrokes - missCount) / keystrokes) * 100)
     : 100;
+
+  const isCustom = activeSentences !== PRESET_SENTENCES;
 
   return (
     <div
@@ -228,55 +288,141 @@ export function TypingGame() {
       onKeyDown={handleKeyDown}
       style={{ outline: 'none', padding: '2rem', fontFamily: 'monospace' }}
     >
-      <h1 style={{ fontSize: '1.4rem', marginBottom: '0.5rem' }}>
-        日本国憲法前文 タイピング
+      <h1 style={{ fontSize: '1.4rem', margin: '0 0 1.2rem' }}>
+        {gameState === 'playing' || gameState === 'finished'
+          ? isCustom ? 'カスタムテキスト タイピング' : '日本国憲法前文 タイピング'
+          : 'AZIKタイピング'}
       </h1>
 
-
-      {/* 原文表示（ルビつき・段落ごと） */}
-      <div style={{
-        marginBottom: '4rem',
-        padding: '1.2rem 1.5rem',
-        border: '1px solid #ddd',
-        fontSize: '1.4rem',
-      }}>
-        {SENTENCES.map((s, pi) => {
-          const offset = paraKanaOffsets[pi];
-          const nextOffset = pi + 1 < SENTENCES.length ? paraKanaOffsets[pi + 1] : kanaUnits.length;
-          const paraLen = nextOffset - offset;
-          const isActive = gameState === 'playing' && kanaPos >= offset && kanaPos < offset + paraLen;
-          const relKanaPos: KanaUnitIndex = gameState === 'playing' ? KanaUnitIndex(kanaPos - offset) : KanaUnitIndex(-1);
-          return (
-            <div key={pi} ref={el => { paraRefs.current[pi] = el; }} style={{
-              lineHeight: 3.2,
-              paddingBottom: gameState === 'playing' ? '2rem' : '1.5rem',
-              borderBottom: pi < SENTENCES.length - 1 ? '1px solid #eee' : 'none',
-              marginBottom: pi < SENTENCES.length - 1 ? '2rem' : 0,
-            }}>
-              <RubyText
-                segments={s.segments}
-                kanaPos={relKanaPos}
-                wrongKey={isActive ? wrongKey : false}
-                recentRomaji={isActive ? recentRomaji : ''}
-                buf={isActive ? buf : ''}
-              />
-            </div>
-          );
-        })}
-      </div>
-
+      {/* idle: テキスト選択・入力フォーム */}
       {gameState === 'idle' && (
-        <div style={{ textAlign: 'center', padding: '2rem' }}>
-          <p>Enter キーでスタート</p>
+        <div style={{ marginBottom: '1.5rem' }}>
+          <div style={{ marginBottom: '0.5rem', display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ fontSize: '0.82rem', color: '#888' }}>例文:</span>
+            {EXAMPLE_TEXTS.map((ex) => (
+              <button
+                key={ex.label}
+                onClick={() => setInputText(ex.text)}
+                style={{ fontSize: '0.8rem', padding: '0.2rem 0.7rem', cursor: 'pointer' }}
+              >
+                {ex.label}
+              </button>
+            ))}
+            {inputText && (
+              <button
+                onClick={() => setInputText('')}
+                style={{ fontSize: '0.8rem', padding: '0.2rem 0.5rem', cursor: 'pointer', color: '#999' }}
+              >
+                ✕ クリア
+              </button>
+            )}
+          </div>
+
+          <textarea
+            value={inputText}
+            onChange={e => setInputText(e.target.value)}
+            placeholder={`テキストを入力（空欄のままスタートすると日本国憲法前文）`}
+            rows={4}
+            style={{
+              width: '100%',
+              boxSizing: 'border-box',
+              fontFamily: 'inherit',
+              fontSize: '0.95rem',
+              padding: '0.6rem',
+              border: '1px solid #ccc',
+              resize: 'vertical',
+              color: '#333',
+            }}
+          />
+
+          <div style={{ marginTop: '0.6rem', display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
+            <button
+              onClick={handleStart}
+              disabled={!tokenizerReady}
+              style={{
+                padding: '0.4rem 1.4rem',
+                fontSize: '1rem',
+                cursor: tokenizerReady ? 'pointer' : 'default',
+              }}
+            >
+              スタート
+            </button>
+            {!tokenizerReady && (
+              <span style={{ fontSize: '0.8rem', color: '#999' }}>辞書を読み込んでいます...</span>
+            )}
+            {prepareError && (
+              <span style={{ fontSize: '0.85rem', color: 'red' }}>{prepareError}</span>
+            )}
+          </div>
         </div>
       )}
 
+      {/* preparing: ルビ生成中 */}
+      {gameState === 'preparing' && (
+        <div style={{ padding: '2rem 0', color: '#666' }}>
+          <div style={{ marginBottom: '0.5rem', fontSize: '0.95rem' }}>
+            {prepareTotal === 0
+              ? (prepareStatus || '処理中...')
+              : `ルビを生成中... ${prepareProgress} / ${prepareTotal} 段落`}
+          </div>
+          {prepareTotal === 0 && prepareStatus && (
+            <div style={{ fontSize: '0.8rem', color: '#aaa' }}>
+              しばらくお待ちください
+            </div>
+          )}
+          {prepareTotal > 0 && (
+            <div style={{ width: '100%', maxWidth: '320px', height: '6px', background: '#eee', borderRadius: '3px' }}>
+              <div style={{
+                height: '100%',
+                borderRadius: '3px',
+                background: '#4a9',
+                width: `${Math.round((prepareProgress / prepareTotal) * 100)}%`,
+                transition: 'width 0.2s ease',
+              }} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* テキスト表示（playing / finished） */}
+      {(gameState === 'playing' || gameState === 'finished') && (
+        <div style={{
+          marginBottom: '4rem',
+          padding: '1.2rem 1.5rem',
+          border: '1px solid #ddd',
+          fontSize: '1.4rem',
+        }}>
+          {activeSentences.map((s, pi) => {
+            const offset = paraKanaOffsets[pi];
+            const nextOffset = pi + 1 < activeSentences.length ? paraKanaOffsets[pi + 1] : kanaUnits.length;
+            const paraLen = nextOffset - offset;
+            const isActive = gameState === 'playing' && kanaPos >= offset && kanaPos < offset + paraLen;
+            const relKanaPos: KanaUnitIndex = gameState === 'playing' ? KanaUnitIndex(kanaPos - offset) : KanaUnitIndex(-1);
+            return (
+              <div key={pi} ref={el => { paraRefs.current[pi] = el; }} style={{
+                lineHeight: 3.2,
+                paddingBottom: gameState === 'playing' ? '2rem' : '1.5rem',
+                borderBottom: pi < activeSentences.length - 1 ? '1px solid #eee' : 'none',
+                marginBottom: pi < activeSentences.length - 1 ? '2rem' : 0,
+              }}>
+                <RubyText
+                  segments={s.segments}
+                  kanaPos={relKanaPos}
+                  wrongKey={isActive ? wrongKey : false}
+                  recentRomaji={isActive ? recentRomaji : ''}
+                  buf={isActive ? buf : ''}
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* playing: ステータスバー */}
       {gameState === 'playing' && (
         <div style={{
           position: 'fixed',
-          bottom: 0,
-          left: 0,
-          right: 0,
+          bottom: 0, left: 0, right: 0,
           background: '#fff',
           borderTop: '1px solid #ddd',
           padding: '0.6rem 2rem',
@@ -290,10 +436,11 @@ export function TypingGame() {
           <span>ミス: {missCount}</span>
           <span>KPS: {kps}</span>
           <span>正確率: {accuracy}%</span>
-          <span>{kanaPos} / {kanaUnits.length} 文字</span>
+          <span>{kanaPos} / {fullKana.length} 文字</span>
         </div>
       )}
 
+      {/* finished: 結果 */}
       {gameState === 'finished' && (
         <div style={{ textAlign: 'center', padding: '2rem' }}>
           <h2>完了!</h2>
@@ -315,7 +462,13 @@ export function TypingGame() {
               <div style={{ fontSize: '0.8rem', color: '#666' }}>ミス</div>
             </div>
           </div>
-          <p>Enter キーでもう一度</p>
+          <p style={{ color: '#666', fontSize: '0.9rem' }}>Enter キーでもう一度</p>
+          <button
+            onClick={() => setGameState('idle')}
+            style={{ marginTop: '0.4rem', fontSize: '0.85rem', padding: '0.3rem 1rem', cursor: 'pointer' }}
+          >
+            別のテキストを選ぶ
+          </button>
         </div>
       )}
     </div>

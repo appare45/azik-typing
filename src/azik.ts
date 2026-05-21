@@ -624,6 +624,9 @@ function splitKanaToUnits(kana: string, map: Map<string, string[]>, maxFirstLen 
 }
 
 const KANA_TO_ROMAJI = buildKanaToRomaji();
+// 歴史的仮名遣い：旧字体かなのローマ字入力
+KANA_TO_ROMAJI.set('ゐ', ['wi']);
+KANA_TO_ROMAJI.set('ゑ', ['we']);
 
 // ローマ字プレフィックス集合（入力中の有効なプレフィックスを判定するため）
 const ROMAJI_PREFIXES = new Set<string>();
@@ -838,15 +841,29 @@ export class InputMatcher {
 
   private tryConsume(buf: string, kanaPos: KanaUnitIndex): KanaUnitIndex[] {
     const results: KanaUnitIndex[] = [];
+
+    // ROMAJI_TO_KANA経由のマッチ（通常ルート）
     const mapped = ROMAJI_TO_KANA[buf];
-    if (!mapped) return results;
-    const mappedUnits = this.buildKanaUnits(mapped);
-    let pos = kanaPos;
-    for (const unit of mappedUnits) {
-      if (pos >= this.kana.length || this.kana[pos] !== unit) return results;
-      pos++;
+    if (mapped) {
+      const mappedUnits = this.buildKanaUnits(mapped);
+      let pos = kanaPos;
+      let ok = true;
+      for (const unit of mappedUnits) {
+        if (pos >= this.kana.length || this.kana[pos] !== unit) { ok = false; break; }
+        pos++;
+      }
+      if (ok) results.push(KanaUnitIndex(pos));
     }
-    results.push(KanaUnitIndex(pos));
+
+    // KANA_TO_ROMAJI経由のマッチ（ゐ/ゑ等、ROMAJI_TO_KANAが現在位置のかなと一致しない場合）
+    if (kanaPos < this.kana.length) {
+      const unit = this.kana[kanaPos];
+      const romajis = KANA_TO_ROMAJI.get(unit);
+      if (romajis?.includes(buf) && mapped !== unit) {
+        results.push(KanaUnitIndex(kanaPos + 1));
+      }
+    }
+
     return results;
   }
 
@@ -862,6 +879,14 @@ export class InputMatcher {
       }
       if (ok) return true;
     }
+
+    // KANA_TO_ROMAJI経由（ゐ/ゑ等）: 現在位置のかなのローマ字候補のいずれかがbufで始まるか
+    if (kanaPos < this.kana.length) {
+      const unit = this.kana[kanaPos];
+      const romajis = KANA_TO_ROMAJI.get(unit);
+      if (romajis?.some(r => r.startsWith(buf))) return true;
+    }
+
     return false;
   }
 }
