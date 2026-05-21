@@ -1,5 +1,6 @@
-// AzooKeyのdefaultAzik.swiftに基づくAZIKテーブル
+// AZIKテーブル — AzooKeyKanaKanjiConverter の defaultAzik.swift を基に作成
 // https://github.com/azooKey/AzooKeyKanaKanjiConverter/blob/main/Sources/KanaKanjiConverterModule/InputManagement/InputTables/defaultAzik.swift
+// Copyright (c) 2023 Miwa / Ensan, MIT License (see LICENSES)
 
 export type RomajiPattern = {
   romaji: string[];

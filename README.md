@@ -59,3 +59,7 @@ idle画面のテキストエリアに日本語を貼り付けて「スタート�
 ## ライセンス
 
 MIT
+
+### サードパーティ
+
+`src/azik.ts` のAZIKテーブルは [AzooKeyKanaKanjiConverter](https://github.com/azooKey/AzooKeyKanaKanjiConverter)（Copyright (c) 2023 Miwa / Ensan, MIT License）の `defaultAzik.swift` を基に作成しています。詳細は [LICENSES](./LICENSES) を参照してください。
